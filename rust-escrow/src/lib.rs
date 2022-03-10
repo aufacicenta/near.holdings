@@ -10,7 +10,7 @@ const CONDITIONAL_ESCROW_CODE: &[u8] = include_bytes!("./conditional_escrow.wasm
 const CREATE_CALL_GAS: Gas = Gas(75_000_000_000_000);
 
 /// Gas allocated on the callback.
-const ON_CREATE_CALL_GAS: Gas = Gas(10_000_000_000_000);
+const ON_CREATE_CALL_GAS: Gas = Gas(15_000_000_000_000);
 
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize)]
@@ -70,7 +70,7 @@ impl EscrowFactory {
                 "new".to_string(),
                 args.into(),
                 0,
-                env::prepaid_gas() - CREATE_CALL_GAS - ON_CREATE_CALL_GAS,
+                CREATE_CALL_GAS,
             );
 
         let callback = Promise::new(env::current_account_id())
@@ -91,17 +91,34 @@ impl EscrowFactory {
         account_id: AccountId,
         attached_deposit: U128,
         predecessor_account_id: AccountId,
-    ) -> bool {
+    ) {
         assert_self();
 
         if near_sdk::is_promise_success() {
             self.conditional_escrow_contracts.insert(&account_id);
-            true
         } else {
-            Promise::new(predecessor_account_id).transfer(attached_deposit.0);
-            // @TODO, we need to panick to let the wallet notify the user, BUT we need to wait for the transfer Promise above to finish first
-            env::panic_str("ERR_CREATE_CONDITIONAL_ESCROW_UNSUCCESSFUL")
+            let promise = Promise::new(predecessor_account_id).transfer(attached_deposit.0);
+
+            let callback = Promise::new(env::current_account_id())
+                .function_call(
+                    "on_transfer_callback".to_string(),
+                    json!({})
+                        .to_string()
+                        .into_bytes(),
+                    0,
+                    Gas(5_000_000_000_000),
+                );
+
+            promise.then(callback);
         }
+    }
+
+    pub fn on_transfer_callback(&self) {
+        if env::promise_results_count() != 1 {
+            env::panic_str("ERR_CALLBACK_METHOD");
+        }
+
+        env::panic_str("ERR_CREATE_CONDITIONAL_ESCROW_UNSUCCESSFUL");
     }
 }
 
@@ -191,5 +208,15 @@ mod tests {
             U128(0),
             alice(),
         );
+
+        testing_env!(
+            context.predecessor_account_id(alice()).build(),
+            near_sdk::VMConfig::test(),
+            near_sdk::RuntimeFeesConfig::test(),
+            Default::default(),
+            vec![PromiseResult::Successful(vec![])],
+        );
+
+        factory.on_transfer_callback();
     }
 }
